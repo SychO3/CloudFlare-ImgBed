@@ -1,0 +1,18 @@
+[build]
+command = "npm install"
+
+[build.upload]
+format = "modules"
+
+[[build.upload.rules]]
+type = "ESModule"
+globs = ["**/*.js"]
+
+[build.upload.module_rules]
+type = "ESModule"
+[build.upload.module_rules.external]
+packages = [
+  "@aws-sdk/client-s3",
+  "@cloudflare/pages-plugin-sentry",
+  "@sentry/tracing"
+]
