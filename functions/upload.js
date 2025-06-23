@@ -6,17 +6,32 @@ import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 let uploadConfig = {};
 let securityConfig = {};
 let rightAuthCode = null;
-let moderateContentApiKey = null;
+let uploadModerate = null;
+
+// 统一的响应创建函数
+function createResponse(body, options = {}) {
+    const defaultHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, authCode',
+    };
+    
+    return new Response(body, {
+        ...options,
+        headers: {
+            ...defaultHeaders,
+            ...options.headers
+        }
+    });
+}
 
 function UnauthorizedException(reason) {
-    return new Response(reason, {
+    return createResponse(reason, {
         status: 401,
         statusText: "Unauthorized",
         headers: {
             "Content-Type": "text/plain;charset=UTF-8",
-            // Disables caching by default.
             "Cache-Control": "no-store",
-            // Returns the "Content-Length" header for HTTP HEAD requests.
             "Content-Length": reason.length,
         },
     });
@@ -77,7 +92,7 @@ export async function onRequestPost(context) {  // Contents of context object
     // 读取安全配置
     securityConfig = await fetchSecurityConfig(env);
     rightAuthCode = securityConfig.auth.user.authCode;
-    moderateContentApiKey = securityConfig.upload.moderate.apiKey;
+    uploadModerate = securityConfig.upload.moderate;
     
     // 鉴权
     if (!authCheck(env, url, request)) {
@@ -89,7 +104,7 @@ export async function onRequestPost(context) {  // Contents of context object
     // 判断上传ip是否被封禁
     const isBlockedIp = await isBlockedUploadIp(env, uploadIp);
     if (isBlockedIp) {
-        return new Response('Error: Your IP is blocked', { status: 403 });
+        return createResponse('Error: Your IP is blocked', { status: 403 });
     }
     // 获取IP地址
     const ipAddress = await getIPAddress(uploadIp);
@@ -129,7 +144,7 @@ export async function onRequestPost(context) {  // Contents of context object
 
     // img_url 未定义或为空的处理逻辑
     if (typeof env.img_url == "undefined" || env.img_url == null || env.img_url == "") {
-        return new Response('Error: Please configure KV database', { status: 500 });
+        return createResponse('Error: Please configure KV database', { status: 500 });
     } 
 
     // 获取文件信息
@@ -140,7 +155,7 @@ export async function onRequestPost(context) {  // Contents of context object
     const fileSize = (formdata.get('file').size / 1024 / 1024).toFixed(2); // 文件大小，单位MB
     // 检查fileType和fileName是否存在
     if (fileType === null || fileType === undefined || fileName === null || fileName === undefined) {
-        return new Response('Error: fileType or fileName is wrong, check the integrity of this file!', { status: 400 });
+        return createResponse('Error: fileType or fileName is wrong, check the integrity of this file!', { status: 400 });
     }
 
     fileName = fileName.split('/').pop();
@@ -281,7 +296,7 @@ async function tryRetry(err, env, uploadChannel, formdata, fullId, metadata, fil
         }
     }
 
-    return new Response(JSON.stringify(errMessages), { status: 500 });
+    return createResponse(JSON.stringify(errMessages), { status: 500 });
 }
 
 
@@ -289,12 +304,12 @@ async function tryRetry(err, env, uploadChannel, formdata, fullId, metadata, fil
 async function uploadFileToCloudflareR2(env, formdata, fullId, metadata, returnLink, originUrl) {
     // 检查R2数据库是否配置
     if (typeof env.img_r2 == "undefined" || env.img_r2 == null || env.img_r2 == "") {
-        return new Response('Error: Please configure R2 database', { status: 500 });
+        return createResponse('Error: Please configure R2 database', { status: 500 });
     }
     // 检查 R2 渠道是否启用
     const r2Settings = uploadConfig.cfr2;
     if (!r2Settings.channels || r2Settings.channels.length === 0) {
-        return new Response('Error: No R2 channel provided', { status: 400 });
+        return createResponse('Error: No R2 channel provided', { status: 400 });
     }
 
     const r2Channel = r2Settings.channels[0];
@@ -319,16 +334,18 @@ async function uploadFileToCloudflareR2(env, formdata, fullId, metadata, returnL
             metadata: metadata,
         });
     } catch (error) {
-        return new Response('Error: Failed to write to KV database', { status: 500 });
+        return createResponse('Error: Failed to write to KV database', { status: 500 });
     }
 
 
     // 成功上传，将文件ID返回给客户端
-    return new Response(
+    return createResponse(
         JSON.stringify([{ 'src': `${returnLink}` }]), 
         {
             status: 200,
-            headers: { 'Content-Type': 'application/json' }
+            headers: { 
+                'Content-Type': 'application/json',
+            }
         }
     );
 }
@@ -344,10 +361,10 @@ async function uploadFileToS3(env, formdata, fullId, metadata, returnLink, origi
         : s3Channels[0];
 
     if (!s3Channel) {
-        return new Response('Error: No S3 channel provided', { status: 400 });
+        return createResponse('Error: No S3 channel provided', { status: 400 });
     }
 
-    const { endpoint, accessKeyId, secretAccessKey, bucketName, region } = s3Channel;
+    const { endpoint, pathStyle, accessKeyId, secretAccessKey, bucketName, region } = s3Channel;
 
     // 创建 S3 客户端
     const s3Client = new S3Client({
@@ -356,12 +373,13 @@ async function uploadFileToS3(env, formdata, fullId, metadata, returnLink, origi
         credentials: {
             accessKeyId,
             secretAccessKey
-        }
+        },
+        forcePathStyle: pathStyle // 是否启用路径风格
     });
 
     // 获取文件
     const file = formdata.get("file");
-    if (!file) return new Response("Error: No file provided", { status: 400 });
+    if (!file) return createResponse("Error: No file provided", { status: 400 });
 
     // 转换 Blob 为 Uint8Array
     const arrayBuffer = await file.arrayBuffer();
@@ -386,8 +404,13 @@ async function uploadFileToS3(env, formdata, fullId, metadata, returnLink, origi
         metadata.ChannelName = s3Channel.name;
 
         const s3ServerDomain = endpoint.replace(/https?:\/\//, "");
-        metadata.S3Location = `https://${bucketName}.${s3ServerDomain}/${s3FileName}`; // 采用虚拟主机风格的 URL
+        if (pathStyle) {
+            metadata.S3Location = `https://${s3ServerDomain}/${bucketName}/${s3FileName}`; // 采用路径风格的 URL
+        } else {
+            metadata.S3Location = `https://${bucketName}.${s3ServerDomain}/${s3FileName}`; // 采用虚拟主机风格的 URL
+        }
         metadata.S3Endpoint = endpoint;
+        metadata.S3PathStyle = pathStyle;
         metadata.S3AccessKeyId = accessKeyId;
         metadata.S3SecretAccessKey = secretAccessKey;
         metadata.S3Region = region || "auto";
@@ -395,11 +418,11 @@ async function uploadFileToS3(env, formdata, fullId, metadata, returnLink, origi
         metadata.S3FileKey = s3FileName;
 
         // 图像审查
-        if (moderateContentApiKey) {
+        if (uploadModerate && uploadModerate.enabled) {
             try {
                 await env.img_url.put(fullId, "", { metadata });
             } catch {
-                return new Response("Error: Failed to write to KV database", { status: 500 });
+                return createResponse("Error: Failed to write to KV database", { status: 500 });
             }
 
             const moderateUrl = `https://${originUrl.hostname}/file/${fullId}`;
@@ -411,15 +434,17 @@ async function uploadFileToS3(env, formdata, fullId, metadata, returnLink, origi
         try {
             await env.img_url.put(fullId, "", { metadata });
         } catch {
-            return new Response("Error: Failed to write to KV database", { status: 500 });
+            return createResponse("Error: Failed to write to KV database", { status: 500 });
         }
 
-        return new Response(JSON.stringify([{ src: returnLink }]), {
+        return createResponse(JSON.stringify([{ src: returnLink }]), {
             status: 200,
-            headers: { "Content-Type": "application/json" },
+            headers: { 
+                "Content-Type": "application/json",
+            },
         });
     } catch (error) {
-        return new Response(`Error: Failed to upload to S3 - ${error.message}`, { status: 500 });
+        return createResponse(`Error: Failed to upload to S3 - ${error.message}`, { status: 500 });
     }
 }
 
@@ -430,7 +455,7 @@ async function uploadFileToTelegram(env, formdata, fullId, metadata, fileExt, fi
     const tgChannels = tgSettings.channels;
     const tgChannel = tgSettings.loadBalance.enabled? tgChannels[Math.floor(Math.random() * tgChannels.length)] : tgChannels[0];
     if (!tgChannel) {
-        return new Response('Error: No Telegram channel provided', { status: 400 });
+        return createResponse('Error: No Telegram channel provided', { status: 400 });
     }
 
     const tgBotToken = tgChannel.botToken;
@@ -492,7 +517,7 @@ async function uploadFileToTelegram(env, formdata, fullId, metadata, fileExt, fi
 
 
     // 向目标 URL 发送请求
-    let res = new Response('upload error, check your environment params about telegram channel!', { status: 400 });
+    let res = createResponse('upload error, check your environment params about telegram channel!', { status: 400 });
     try {
         const response = await fetch(targetUrl.href, {
             method: clonedRequest.method,
@@ -510,11 +535,13 @@ async function uploadFileToTelegram(env, formdata, fullId, metadata, fileExt, fi
 
         // 若上传成功，将响应返回给客户端
         if (response.ok) {
-            res = new Response(
+            res = createResponse(
                 JSON.stringify([{ 'src': `${returnLink}` }]),
                 {
                     status: 200,
-                    headers: { 'Content-Type': 'application/json' }
+                    headers: { 
+                        'Content-Type': 'application/json',
+                    }
                 }
             );
         }
@@ -536,10 +563,10 @@ async function uploadFileToTelegram(env, formdata, fullId, metadata, fileExt, fi
                 metadata: metadata,
             });
         } catch (error) {
-            res = new Response('Error: Failed to write to KV database', { status: 500 });
+            res = createResponse('Error: Failed to write to KV database', { status: 500 });
         }
     } catch (error) {
-        res = new Response('upload error, check your environment params about telegram channel!', { status: 400 });
+        res = createResponse('upload error, check your environment params about telegram channel!', { status: 400 });
     } finally {
         return res;
     }
@@ -554,7 +581,7 @@ async function uploadFileToExternal(env, formdata, fullId, metadata, returnLink,
     // 从 formdata 中获取外链
     const extUrl = formdata.get('url');
     if (extUrl === null || extUrl === undefined) {
-        return new Response('Error: No url provided', { status: 400 });
+        return createResponse('Error: No url provided', { status: 400 });
     }
     metadata.ExternalLink = extUrl;
     // 写入KV数据库
@@ -563,15 +590,17 @@ async function uploadFileToExternal(env, formdata, fullId, metadata, returnLink,
             metadata: metadata,
         });
     } catch (error) {
-        return new Response('Error: Failed to write to KV database', { status: 500 });
+        return createResponse('Error: Failed to write to KV database', { status: 500 });
     }
 
     // 返回结果
-    return new Response(
+    return createResponse(
         JSON.stringify([{ 'src': `${returnLink}` }]), 
         {
             status: 200,
-            headers: { 'Content-Type': 'application/json' }
+            headers: { 
+                'Content-Type': 'application/json',
+            }
         }
     );
 }
@@ -579,28 +608,69 @@ async function uploadFileToExternal(env, formdata, fullId, metadata, returnLink,
 
 // 图像审查
 async function moderateContent(env, url, metadata) {
-    const apikey = moderateContentApiKey;
-    if (apikey == undefined || apikey == null || apikey == "") {
+    const enableModerate = uploadModerate && uploadModerate.enabled;
+
+    // 如果未启用审查，直接返回metadata
+    if (!enableModerate) {
         metadata.Label = "None";
-    } else {
+        return metadata;
+    }
+
+    // moderatecontent.com 渠道
+    if (uploadModerate.channel === 'moderatecontent.com') {
+        const apikey = securityConfig.upload.moderate.moderateContentApiKey;
+        if (apikey == undefined || apikey == null || apikey == "") {
+            metadata.Label = "None";
+        } else {
+            try {
+                const fetchResponse = await fetch(`https://api.moderatecontent.com/moderate/?key=${apikey}&url=${url}`);
+                if (!fetchResponse.ok) {
+                    throw new Error(`HTTP error! status: ${fetchResponse.status}`);
+                }
+                const moderate_data = await fetchResponse.json();
+                if (moderate_data.rating_label) {
+                    metadata.Label = moderate_data.rating_label;
+                }
+            } catch (error) {
+                console.error('Moderate Error:', error);
+                // 将不带审查的图片写入数据库
+                metadata.Label = "None";
+            }
+        }
+        return metadata;
+    }
+
+    // nsfw 渠道 和 默认渠道
+    if (uploadModerate.channel === 'nsfwjs' || uploadModerate.channel === 'default') {
+        const defaultApiPath = 'https://nsfwjs.1314883.xyz';
+        const nsfwApiPath = uploadModerate.channel === 'default' ? defaultApiPath : securityConfig.upload.moderate.nsfwApiPath;
+
         try {
-            const fetchResponse = await fetch(`https://api.moderatecontent.com/moderate/?key=${apikey}&url=${url}`);
+            const fetchResponse = await fetch(`${nsfwApiPath}?url=${encodeURIComponent(url)}`);
             if (!fetchResponse.ok) {
                 throw new Error(`HTTP error! status: ${fetchResponse.status}`);
             }
             const moderate_data = await fetchResponse.json();
-            if (moderate_data.rating_label) {
-                metadata.Label = moderate_data.rating_label;
+
+            const score = moderate_data.score || 0;
+            if (score >= 0.9) {
+                metadata.Label = "adult";
+            } else if (score >= 0.7) {
+                metadata.Label = "teen";
+            } else {
+                metadata.Label = "everyone";
             }
         } catch (error) {
             console.error('Moderate Error:', error);
             // 将不带审查的图片写入数据库
             metadata.Label = "None";
-        } finally {
-            console.log('Moderate Done');
-        }
+        } 
+
+        return metadata;
     }
-    return metadata;
+
+    metadata.Label = "None";
+    return metadata; // 如果没有匹配到任何渠道，直接返回metadata
 }
 
 function getFile(response) {
