@@ -26,11 +26,11 @@ export async function errorHandling(context) {
       tracesSampleRate: sampleRate,
     })(context);;
   }
+
   return context.next();
 }
 
 export async function telemetryData(context) {
-  const env = context.env;
   // 读取KV中的设置
   const othersConfig = await fetchOthersConfig(context.env);
   disableTelemetry = !othersConfig.telemetry.enabled;
@@ -75,13 +75,14 @@ export async function telemetryData(context) {
       const transaction = context.data.sentry.startTransaction({ name: `${context.request.method} ${hostname}` });
       //add the transaction to the context
       context.data.transaction = transaction;
-      return context.next();
+      return await context.next();
     } catch (e) {
       console.log(e);
     } finally {
       context.data.transaction.finish();
     }
   }
+
   return context.next();
 }
 
@@ -108,4 +109,29 @@ async function fetchSampleRate(context) {
     const json = await response.json();
     return json.rate;
   }
+}
+
+// 检查 KV 是否配置 - Cloudflare Pages Function 中间件
+export async function checkKVConfig(context) {
+  const { env } = context;
+
+  // 检查 img_url KV 绑定是否存在
+  if (typeof env.img_url == "undefined" || env.img_url == null) {
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: "KV 数据库未配置 / KV not configured",
+        message: "img_url KV 绑定未找到，请检查您的 KV 配置。 / img_url KV binding not found, please check your KV configuration."
+      }), 
+      {
+        status: 500,
+        headers: {
+          "Content-Type": "application/json"
+        }
+      }
+    );
+  }
+
+  // 继续执行
+  return context.next();
 }
