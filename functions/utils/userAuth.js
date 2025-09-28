@@ -1,5 +1,6 @@
 import { fetchSecurityConfig } from './sysConfig';
 import { validateApiToken } from './tokenValidator';
+import { getDatabase } from './databaseAdapter.js';
 
 /** 
  * 客户端用户认证
@@ -11,7 +12,7 @@ import { validateApiToken } from './tokenValidator';
  */
 export async function userAuthCheck(env, url, request, requiredPermission = null) {
     // 首先使用Token验证
-    const tokenValidation = await validateApiToken(request, env.img_url, requiredPermission);
+    const tokenValidation = await validateApiToken(request, getDatabase(env), requiredPermission);
     if (tokenValidation.valid) {
         return true;
     }
@@ -20,9 +21,10 @@ export async function userAuthCheck(env, url, request, requiredPermission = null
     const securityConfig = await fetchSecurityConfig(env);
     const rightAuthCode = securityConfig.auth.user.authCode;
 
-    // 优先从请求 URL 获取 authCode
+    // 优先从请求 URL 参数获取 authCode
     let authCode = url.searchParams.get('authCode');
-    // 如果 URL 中没有 authCode，从 Referer 中获取
+
+    // 如果 URL 参数中没有 authCode，从 Referer 中获取
     if (!authCode) {
         const referer = request.headers.get('Referer');
         if (referer) {
@@ -34,10 +36,12 @@ export async function userAuthCheck(env, url, request, requiredPermission = null
             }
         }
     }
+
     // 如果 Referer 中没有 authCode，从请求头中获取
     if (!authCode) {
         authCode = request.headers.get('authCode');
     }
+
     // 如果请求头中没有 authCode，从 Cookie 中获取
     if (!authCode) {
         const cookies = request.headers.get('Cookie');
